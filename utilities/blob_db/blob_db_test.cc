@@ -69,12 +69,13 @@ class BlobDBTest : public testing::Test {
     ASSERT_NE(nullptr, blobdb_);
   }
 
-  void PutRandomWithTTL(const std::string& key, int32_t ttl, Random *rnd,
+  void PutRandomWithTTL(const std::string &key, int32_t ttl, Random *rnd,
                         std::map<std::string, std::string> *data = nullptr) {
     int len = rnd->Next() % 16384 + 1;
     std::string value = test::RandomHumanReadableString(rnd, len);
     ColumnFamilyHandle *cfh = blobdb_->DefaultColumnFamily();
-    ASSERT_OK(blobdb_->PutWithTTL(WriteOptions(), cfh, Slice(key), Slice(value), ttl));
+    ASSERT_OK(blobdb_->PutWithTTL(WriteOptions(), cfh, Slice(key), Slice(value),
+                                  ttl));
     if (data != nullptr) {
       (*data)[key] = value;
     }
@@ -93,9 +94,9 @@ class BlobDBTest : public testing::Test {
   // Verify blob db contain expected data and nothing more.
   // TODO(yiwu): Verify blob files are consistent with data in LSM.
   void VerifyDB(const std::map<std::string, std::string> &data) {
-    Iterator* iter = blobdb_->NewIterator(ReadOptions());
+    Iterator *iter = blobdb_->NewIterator(ReadOptions());
     iter->SeekToFirst();
-    for (auto& p : data) {
+    for (auto &p : data) {
       ASSERT_TRUE(iter->Valid());
       ASSERT_EQ(p.first, iter->key().ToString());
       ASSERT_EQ(p.second, iter->value().ToString());
@@ -485,6 +486,45 @@ TEST_F(BlobDBTest, Large) {
   ASSERT_EQ(value2, value);
   ASSERT_OK(blobdb_->Get(ro, dcfh, "barfoo", &value));
   ASSERT_EQ(value3, value);
+}
+
+// Test sequence number store in blob file is correct.
+TEST_F(BlobDBTest, SequenceNumber) {
+  Random rnd(223);
+  Reopen(BlobDBOptionsImpl(), Options());
+  SequenceNumber sequence = blobdb_->GetLatestSequenceNumber();
+  BlobDBImpl *blobdb_impl = reinterpret_cast<BlobDBImpl *>(blobdb_);
+  for (int i = 0; i < 100; i++) {
+    std::string key = "key" + ToString(i);
+    PutRandom(key, &rnd);
+    sequence += 1;
+    ASSERT_EQ(sequence, blobdb_->GetLatestSequenceNumber());
+    SequenceNumber actual_sequence = 0;
+    ASSERT_OK(blobdb_impl->TEST_GetSequenceNumber(key, &actual_sequence));
+    ASSERT_EQ(sequence, actual_sequence);
+  }
+  for (int i = 0; i < 100; i++) {
+    WriteBatch batch;
+    size_t batch_size = rnd.Next() % 10 + 1;
+    for (size_t k = 0; k < batch_size; k++) {
+      std::string value = test::RandomHumanReadableString(&rnd, 1000);
+      ASSERT_OK(batch.Put("key" + ToString(i) + "-" + ToString(k), value));
+    }
+    ASSERT_OK(blobdb_->Write(WriteOptions(), &batch));
+    sequence += batch_size;
+    ASSERT_EQ(sequence, blobdb_->GetLatestSequenceNumber());
+    for (size_t k = 0; k < batch_size; k++) {
+      std::string key = "key" + ToString(i) + "-" + ToString(k);
+      SequenceNumber actual_sequence;
+      ASSERT_OK(blobdb_impl->TEST_GetSequenceNumber(key, &actual_sequence));
+      // We only write sequence for the last key in a batch.
+      if (k + 1 < batch_size) {
+        ASSERT_EQ(0, actual_sequence);
+      } else {
+        ASSERT_EQ(sequence, actual_sequence);
+      }
+    }
+  }
 }
 
 }  //  namespace blob_db
